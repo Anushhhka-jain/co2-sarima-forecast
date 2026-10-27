@@ -1,0 +1,7 @@
+# Needed by the Streamlit app (app.py) and train.py - this is what Streamlit Cloud installs
+streamlit>=1.50
+pandas>=2.2
+numpy>=1.26
+scipy>=1.13
+statsmodels>=0.14.4
+plotly>=5.24

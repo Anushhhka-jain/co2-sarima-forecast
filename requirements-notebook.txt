@@ -1,0 +1,6 @@
+# Everything above plus the tools for running the analysis notebook
+-r requirements.txt
+matplotlib>=3.9
+notebook>=7.0
+ipykernel>=6.29
+nbconvert>=7.16
