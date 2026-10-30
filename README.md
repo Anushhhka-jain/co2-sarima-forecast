@@ -85,8 +85,10 @@ Tested with Python 3.14, pandas 3.1, statsmodels 0.15, streamlit 1.66, plotly 7.
 - **Forecast:** choose a horizon of 1–120 months and an 80 % or 95 % prediction interval. It shows
   the latest measurement, the forecast value, the recent growth rate, and when 450 ppm is reached.
   Includes an interactive chart, a monthly forecast table with CSV download, and yearly averages.
-- **Data & seasonality:** STL decomposition, the average seasonal effect by month, descriptive statistics,
-  and the raw data.
+- **Exploratory analysis:** line graph (full record + last 5 years), scatter plots (trend fits, lag-1 and
+  lag-12), histograms and QQ plots of the levels and monthly changes with normality tests, descriptive
+  statistics (summary table + decade averages), and ACF/PACF plots of the original and differenced series.
+- **Data & seasonality:** STL decomposition, the average seasonal effect by month, and the raw data.
 - **Model details:** model equation, coefficients, AIC/BIC, hold-out accuracy, Ljung–Box test, residual
   plots, and the model-selection table.
 - A sidebar switch downloads the newest NOAA data and re-fits the model on the fly.

@@ -9,9 +9,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from scipy import stats
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.seasonal import STL
-from statsmodels.tsa.stattools import acf
+from statsmodels.tsa.stattools import acf, pacf
 
 from src.ts_utils import (MODEL_INFO_PATH, MODEL_PATH, NOAA_URL, PROJECT_ROOT, RAW_PATH,
                           fit_sarima, load_co2, load_model)
@@ -23,10 +24,10 @@ st.set_page_config(page_title="CO₂ Forecast · SARIMA", page_icon="🌍", layo
 
 # Chart colours: same hues in both themes, stepped for the light or dark background
 PALETTE = {
-    "light": {"history": "#2a78d6", "forecast": "#eb6834", "neg": "#e34948",
-              "grid": "#e1e0d9", "axis": "#c3c2b7", "muted": "#898781", "band_alpha": 0.15},
-    "dark": {"history": "#3987e5", "forecast": "#d95926", "neg": "#e66767",
-             "grid": "#2c2c2a", "axis": "#383835", "muted": "#898781", "band_alpha": 0.3},
+    "light": {"history": "#2a78d6", "forecast": "#eb6834", "third": "#1baf7a", "tint": "#86b6ef",
+              "neg": "#e34948", "grid": "#e1e0d9", "axis": "#c3c2b7", "muted": "#898781", "band_alpha": 0.15},
+    "dark": {"history": "#3987e5", "forecast": "#d95926", "third": "#199e70", "tint": "#1c5cab",
+             "neg": "#e66767", "grid": "#2c2c2a", "axis": "#383835", "muted": "#898781", "band_alpha": 0.3},
 }
 C = PALETTE["dark" if st.context.theme.type == "dark" else "light"]
 
@@ -110,7 +111,8 @@ st.title("Atmospheric CO₂ forecast — Mauna Loa")
 st.caption(f"SARIMA(0,1,1)(0,1,1)₁₂ · {source_note} · data {y.index.min():%b %Y} – {y.index.max():%b %Y} "
            f"({len(y)} months)")
 
-tab_forecast, tab_data, tab_model = st.tabs(["Forecast", "Data & seasonality", "Model details"])
+tab_forecast, tab_eda, tab_data, tab_model = st.tabs(
+    ["Forecast", "Exploratory analysis", "Data & seasonality", "Model details"])
 
 # ------------------------------------------------------------------ forecast tab
 with tab_forecast:
@@ -179,6 +181,199 @@ with tab_forecast:
         else:
             st.info("Increase the horizon to see complete forecast years.")
 
+# ------------------------------------------------------------------ exploratory analysis tab
+def table_height(rows: int) -> int:
+    """Pixel height that shows every row of an st.dataframe without scrolling."""
+    return (rows + 1) * 35 + 3
+
+
+def p_text(p: float) -> str:
+    return "< 0.001" if p < 0.001 else f"{p:.3f}"
+
+
+with tab_eda:
+    change = y.diff().dropna()  # month-to-month change
+    both = [("CO₂ levels", y, "ppm"), ("Month-to-month change", change, "ppm change")]
+    dots = dict(color=C["history"], size=5, opacity=0.5)
+
+    # --- line graph
+    st.subheader("Line graph")
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.markdown(f"**Monthly CO₂, {y.index.min():%Y}–{y.index.max():%Y}**")
+        full = go.Figure(go.Scatter(x=y.index, y=y, name="CO₂", line=dict(color=C["history"], width=2),
+                                    hovertemplate="%{y:.2f} ppm<extra></extra>"))
+        st.plotly_chart(style(full, height=340), width="stretch")
+    with c2:
+        recent = y[y.index > y.index.max() - pd.DateOffset(years=5)]
+        st.markdown("**Last 5 years: the yearly up-and-down cycle**")
+        zoom = go.Figure(go.Scatter(x=recent.index, y=recent, mode="lines+markers", name="CO₂",
+                                    line=dict(color=C["history"], width=2), marker=dict(size=6),
+                                    hovertemplate="%{y:.2f} ppm<extra></extra>"))
+        st.plotly_chart(style(zoom, height=340), width="stretch")
+    st.caption(f"A steady upward trend, from {y.iloc[0]:.0f} ppm in {y.index[0]:%Y} to {y.iloc[-1]:.0f} ppm in "
+               f"{y.index[-1]:%Y}, that bends slightly upwards (the rise is speeding up). A regular yearly cycle "
+               "sits on top: CO₂ peaks around May and is lowest in September–October. No sudden jumps or outliers.")
+
+    # --- scatter plots
+    st.subheader("Scatter plots")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**CO₂ vs time, with fitted trends**")
+        t = np.arange(len(y))
+        total_ss = np.sum((y - y.mean()) ** 2)
+        r2 = {}
+        trend = go.Figure(go.Scatter(x=y.index, y=y, mode="markers", name="Monthly value", marker=dots,
+                                     hovertemplate="%{x|%b %Y}: %{y:.2f} ppm<extra></extra>"))
+        for name, degree, color in [("Linear", 1, C["third"]), ("Quadratic", 2, C["forecast"])]:
+            fit = np.polyval(np.polyfit(t, y, degree), t)
+            r2[name] = 1 - np.sum((y - fit) ** 2) / total_ss
+            trend.add_trace(go.Scatter(x=y.index, y=fit, name=f"{name} trend", line=dict(color=color, width=2),
+                                       hovertemplate="%{x|%b %Y}: %{y:.2f} ppm<extra>" + name + " trend</extra>"))
+        st.plotly_chart(style(trend, height=360).update_layout(hovermode="closest"), width="stretch")
+        st.caption(f"R²: linear {r2['Linear']:.4f}, quadratic {r2['Quadratic']:.4f}. The curve fits better than "
+                   "a straight line, so the trend is accelerating.")
+    for col, lag in [(c2, 1), (c3, 12)]:
+        with col:
+            st.markdown(f"**Lag-{lag} plot: y(t) vs y(t−{lag})**")
+            pairs = pd.DataFrame({"before": y.shift(lag), "now": y}).dropna()
+            earlier = f"{lag} month{'s' if lag > 1 else ''} earlier"
+            lag_fig = go.Figure(go.Scatter(
+                x=pairs["before"], y=pairs["now"], mode="markers", marker=dots,
+                customdata=pairs.index.strftime("%b %Y"),
+                hovertemplate="%{customdata}: %{y:.2f} ppm<br>" + earlier + ": %{x:.2f} ppm<extra></extra>"))
+            style(lag_fig, height=360, y_title="CO₂ at t (ppm)").update_layout(hovermode="closest")
+            lag_fig.update_xaxes(title_text=f"CO₂ at t−{lag} (ppm)")
+            st.plotly_chart(lag_fig, width="stretch")
+            st.caption(f"Correlation = {y.autocorr(lag):.4f}")
+    st.caption("In the lag plots the points lie almost on a straight line: each month is very strongly correlated "
+               "with the month before and with the same month last year. Time series models use this memory.")
+
+    # --- histograms
+    st.subheader("Histograms")
+    for col, (name, s, unit) in zip(st.columns(2), both):
+        with col:
+            st.markdown(f"**{name}**")
+            xs = np.linspace(s.min(), s.max(), 300)
+            hist = go.Figure(go.Histogram(x=s, nbinsx=30, histnorm="probability density", name="Histogram",
+                                          marker_color=C["tint"],
+                                          hovertemplate="%{x} " + unit + "<br>density %{y:.4f}<extra></extra>"))
+            for label, curve, color in [("Density (KDE)", stats.gaussian_kde(s)(xs), C["history"]),
+                                        ("Normal curve", stats.norm.pdf(xs, s.mean(), s.std()), C["forecast"])]:
+                hist.add_trace(go.Scatter(x=xs, y=curve, name=label, line=dict(color=color, width=2),
+                                          hovertemplate="%{x:.2f} " + unit + ": %{y:.4f}<extra>" + label + "</extra>"))
+            style(hist, height=340, y_title="Density").update_layout(hovermode="closest", bargap=0.05)
+            hist.update_xaxes(title_text=unit)
+            st.plotly_chart(hist, width="stretch")
+    st.caption("The levels are not bell-shaped: they spread over a wide range and lean to the right (more months "
+               "at the low values from the early, slower-growing decades). Because of the trend they are not draws "
+               "from one distribution, a sign of non-stationarity. The monthly changes have two humps, one for the "
+               "months when CO₂ rises and one for when it falls: the seasonal cycle again.")
+
+    # --- QQ plots
+    st.subheader("QQ plots")
+    for col, (name, s, unit) in zip(st.columns(2), both):
+        with col:
+            st.markdown(f"**{name}**")
+            (theory, ordered), _ = stats.probplot(s, dist="norm")
+            ends = theory[[0, -1]]
+            qq = go.Figure()
+            qq.add_trace(go.Scatter(x=theory, y=ordered, mode="markers", name="Data", marker=dots,
+                                    hovertemplate="theoretical %{x:.2f}<br>observed %{y:.2f} " + unit
+                                                  + "<extra></extra>"))
+            # same standardised reference line as statsmodels qqplot(line="s") in the notebook
+            qq.add_trace(go.Scatter(x=ends, y=s.mean() + s.std() * ends, mode="lines",
+                                    name="Normal reference line", line=dict(color=C["forecast"], width=2),
+                                    hoverinfo="skip"))
+            style(qq, height=340, y_title=f"Observed quantiles ({unit})").update_layout(hovermode="closest")
+            qq.update_xaxes(title_text="Theoretical quantiles (standard normal)")
+            st.plotly_chart(qq, width="stretch")
+
+    rows = []
+    for name, s, _ in both:
+        shapiro_p, jb_p = stats.shapiro(s).pvalue, stats.jarque_bera(s).pvalue
+        rows.append({"Series": name, "Shapiro–Wilk p-value": p_text(shapiro_p), "Jarque–Bera p-value": p_text(jb_p),
+                     "Skewness": round(s.skew(), 3), "Excess kurtosis": round(s.kurt(), 3),
+                     "Normally distributed?": "Yes" if min(shapiro_p, jb_p) > 0.05 else "No"})
+    st.markdown("**Normality tests**")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("Points bending away from the line at both ends, and p-values below 0.05, mean the data are not "
+               "normally distributed. That is expected for a trending, seasonal series: the normality assumption "
+               "applies to the model's residuals, not to the raw data.")
+
+    # --- descriptive statistics
+    st.subheader("Descriptive statistics")
+    counts = y.groupby(y.index.year).size()
+    annual = y.groupby(y.index.year).mean()[counts == 12]  # complete calendar years only
+    growth = annual.diff()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Monthly series**")
+        summary = pd.DataFrame({
+            "Statistic": ["Observations", "Period", "Mean", "Median", "Standard deviation", "Minimum",
+                          "First quartile (25%)", "Third quartile (75%)", "Maximum", "Range",
+                          "Coefficient of variation", "Skewness", "Excess kurtosis",
+                          "Average yearly increase, last 10 years"],
+            "Value": [f"{len(y)} months", f"{y.index.min():%b %Y} – {y.index.max():%b %Y}",
+                      f"{y.mean():.2f} ppm", f"{y.median():.2f} ppm", f"{y.std():.2f} ppm",
+                      f"{y.min():.2f} ppm ({y.idxmin():%b %Y})", f"{y.quantile(0.25):.2f} ppm",
+                      f"{y.quantile(0.75):.2f} ppm", f"{y.max():.2f} ppm ({y.idxmax():%b %Y})",
+                      f"{y.max() - y.min():.2f} ppm", f"{y.std() / y.mean() * 100:.2f} %", f"{y.skew():.3f}",
+                      f"{y.kurt():.3f}", f"{growth.iloc[-10:].mean():.2f} ppm/yr"],
+        })
+        st.dataframe(summary, hide_index=True, width="stretch", height=table_height(len(summary)))
+    with c2:
+        st.markdown("**By decade** (complete calendar years only)")
+        decade = annual.index // 10 * 10
+        decades = []
+        for start, years in annual.groupby(decade):
+            label = f"{start}s"
+            if len(years) < 10:  # partial decade: say which years it covers
+                first, last = years.index.min(), years.index.max()
+                label += f" ({first})" if first == last else f" ({first}–{last})"
+            mean_growth = growth.loc[years.index].mean()
+            decades.append({"Decade": label, "Mean CO₂ (ppm)": f"{years.mean():.2f}",
+                            "Average yearly increase (ppm/yr)": "—" if pd.isna(mean_growth) else f"{mean_growth:.2f}"})
+        st.dataframe(pd.DataFrame(decades), hide_index=True, width="stretch", height=table_height(len(decades)))
+        early, late = growth.loc[1960:1969].mean(), growth.iloc[-10:].mean()
+        st.caption(f"CO₂ grew by {early:.2f} ppm a year in the 1960s and by {late:.2f} ppm a year over the last "
+                   f"10 years, about {late / early:.1f} times faster.")
+
+    # --- ACF and PACF
+    st.subheader("ACF and PACF")
+    st.caption("**ACF:** correlation of the series with its own past values at each lag. **PACF:** the same "
+               "correlation after removing the effect of the shorter lags. Bars outside the shaded band "
+               "(±1.96/√n, 95% confidence) are statistically significant.")
+    nlags = 48
+    differenced = y.diff().diff(12).dropna()  # d = 1 and D = 1, as used by the model
+    acf_diff = acf(differenced, nlags=nlags)
+    row_notes = {
+        "Original series": "The ACF starts near 1 and decays very slowly: the signature of a trending, "
+                           "non-stationary series, so it has to be differenced first.",
+        "After differencing (d = 1, D = 1)": (
+            f"The ACF has a negative spike at lag 1 ({acf_diff[1]:.2f}) and a larger one at lag 12 "
+            f"({acf_diff[12]:.2f}), then cuts off (the small spike at lag 11 is a side-effect of combining a "
+            "lag-1 and a lag-12 term). The PACF tails off at lags 1–3 and at the seasonal lags "
+            "12, 24, 36. ACF cutting off while PACF tails off means moving-average terms: MA(1) and seasonal "
+            "MA(1), which gives SARIMA(0,1,1)(0,1,1)₁₂."),
+    }
+    for label, s in [("Original series", y), ("After differencing (d = 1, D = 1)", differenced)]:
+        bound = 1.96 / np.sqrt(len(s))
+        values = {"ACF": acf_diff if s is differenced else acf(s, nlags=nlags),
+                  "PACF": pacf(s, nlags=nlags, method="ywm")}
+        for col, (name, corr) in zip(st.columns(2), values.items()):
+            with col:
+                st.markdown(f"**{name}: {label[0].lower() + label[1:]}**")
+                corr_fig = go.Figure(go.Bar(x=np.arange(1, nlags + 1), y=corr[1:], marker_color=C["history"],
+                                            width=0.5, hovertemplate="lag %{x}: %{y:.3f}<extra></extra>"))
+                corr_fig.add_hrect(y0=-bound, y1=bound, fillcolor=C["muted"], opacity=0.2, line_width=0,
+                                   layer="below")
+                corr_fig.add_hline(y=0, line=dict(color=C["axis"], width=1))
+                style(corr_fig, height=300, y_title=name).update_layout(hovermode="closest")
+                corr_fig.update_xaxes(title_text="Lag (months)", dtick=6)
+                st.plotly_chart(corr_fig, width="stretch")
+        st.caption(row_notes[label])
+
 # ------------------------------------------------------------------ data tab
 with tab_data:
     stl = decompose(y)
@@ -194,31 +389,17 @@ with tab_data:
     dec.update_annotations(x=0, xanchor="left", font_size=13)
     st.plotly_chart(dec, width="stretch")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Average seasonal effect by month")
-        profile = stl.seasonal.groupby(stl.seasonal.index.month).mean()
-        bars = go.Figure(go.Bar(
-            x=MONTHS, y=profile.values,
-            marker_color=[C["history"] if v >= 0 else C["neg"] for v in profile.values],
-            hovertemplate="%{x}: %{y:+.2f} ppm<extra></extra>", width=0.55,
-        ))
-        st.plotly_chart(style(bars, height=340, y_title="ppm above / below trend"), width="stretch")
-        st.caption("CO₂ peaks in May and is lowest in September–October: Northern Hemisphere plants absorb "
-                   "CO₂ while growing in summer and release it when leaves decay.")
-    with c2:
-        st.subheader("Descriptive statistics")
-        counts = y.groupby(y.index.year).size()
-        annual = y.groupby(y.index.year).mean()[counts == 12]
-        stats_table = pd.DataFrame({
-            "Statistic": ["Observations", "Mean", "Median", "Std deviation", "Minimum", "Maximum",
-                          "Skewness", "Average yearly increase, 1960s", "Average yearly increase, last 10 years"],
-            "Value": [f"{len(y)}", f"{y.mean():.2f} ppm", f"{y.median():.2f} ppm", f"{y.std():.2f} ppm",
-                      f"{y.min():.2f} ppm ({y.idxmin():%b %Y})", f"{y.max():.2f} ppm ({y.idxmax():%b %Y})",
-                      f"{y.skew():.3f}", f"{annual.diff().loc[1960:1969].mean():.2f} ppm/yr",
-                      f"{annual.diff().iloc[-10:].mean():.2f} ppm/yr"],
-        })
-        st.dataframe(stats_table, hide_index=True, width="stretch")
+    st.subheader("Average seasonal effect by month")
+    profile = stl.seasonal.groupby(stl.seasonal.index.month).mean()
+    bars = go.Figure(go.Bar(
+        x=MONTHS, y=profile.values,
+        marker_color=[C["history"] if v >= 0 else C["neg"] for v in profile.values],
+        hovertemplate="%{x}: %{y:+.2f} ppm<extra></extra>", width=0.55,
+    ))
+    st.plotly_chart(style(bars, height=340, y_title="ppm above / below trend"), width="stretch")
+    st.caption("CO₂ peaks in May and is lowest in September–October: Northern Hemisphere plants absorb "
+               "CO₂ while growing in summer and release it when leaves decay. Descriptive statistics are in the "
+               "Exploratory analysis tab.")
 
     with st.expander("Show the monthly data"):
         data_table = y.reset_index()
